@@ -41,6 +41,27 @@ from app.models import DocumentCreate, DocumentRead, DocumentUpdate, Role, User
 router = APIRouter(prefix="/api", tags=["3 · Documentos"])
 
 
+def _check_tenant(doc, user: User, action: str) -> None:
+    """Tenancy: el documento tiene que ser de TU empresa (403 si no)."""
+    if doc.tenant_id != user.tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"No podés {action} documentos de otra empresa",
+        )
+
+
+def _check_owner_or_admin(doc, user: User, action: str) -> None:
+    """Object-level: solo el dueño o un admin (de la empresa) pasan.
+
+    Se usa el rol del USUARIO (fresco desde storage), no el del token.
+    """
+    if doc.owner_id != user.id and user.role != Role.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"No podés {action} este documento",
+        )
+
+
 @router.post(
     "/documents",
     response_model=DocumentRead,
@@ -48,7 +69,7 @@ router = APIRouter(prefix="/api", tags=["3 · Documentos"])
 )
 def create_document(
     body: DocumentCreate,
-    current_user: User = Depends(get_current_user),  # 🔓 TODO: Depends(require_scope("write"))
+    current_user: User = Depends(require_scope("write")),
 ):
     """Crea un documento: draft privado a nombre tuyo, en TU empresa.
 
@@ -92,7 +113,10 @@ def get_document(
     doc = storage.get_document(doc_id)
     if doc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Documento no encontrado")
-    # 🔓 TU CÓDIGO ACÁ (tenancy + object-level según las reglas de arriba).
+    _check_tenant(doc, current_user, "VER")
+    if doc.visibility == "public":
+        return doc
+    _check_owner_or_admin(doc, current_user, "ver")
     return doc
 
 
@@ -100,27 +124,31 @@ def get_document(
 def update_document(
     doc_id: int,
     body: DocumentUpdate,
-    current_user: User = Depends(get_current_user),  # 🔓 TODO: Depends(require_scope("write"))
+    current_user: User = Depends(require_scope("write")),
 ):
     """Edita un documento: solo el DUEÑO o un ADMIN de la empresa."""
     doc = storage.get_document(doc_id)
     if doc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Documento no encontrado")
-    # 🔓 TODO: tenancy (403 si es de otra empresa).
-    # 🔓 TODO: object-level — ¿dueño o admin? si NO → 403 ("No podés editar este documento").
+    _check_tenant(doc, current_user, "EDITAR")
+    _check_owner_or_admin(doc, current_user, "editar")
     return storage.update_document(doc_id, body)
 
 
-@router.delete("/documents/{doc_id}", response_model=DocumentRead)
+@router.delete(
+    "/documents/{doc_id}",
+    response_model=DocumentRead,
+    dependencies=[Depends(require_scope("write"))],
+)
 def delete_document(
     doc_id: int,
-    current_user: User = Depends(get_current_user),  # 🔓 TODO: Depends(require_role(Role.ADMIN)) + Depends(require_scope("write"))
+    current_user: User = Depends(require_role(Role.ADMIN)),
 ):
     """Borra un documento: SOLO admin (la matriz exige 403 para editor/viewer)."""
     doc = storage.get_document(doc_id)
     if doc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Documento no encontrado")
-    # 🔓 TODO: tenancy — un admin de Acme no borra docs de Globex (403).
+    _check_tenant(doc, current_user, "BORRAR")
     deleted = storage.delete_document(doc_id)
     return deleted
 
@@ -128,7 +156,7 @@ def delete_document(
 @router.post("/documents/{doc_id}/publish", response_model=DocumentRead)
 def publish_document(
     doc_id: int,
-    current_user: User = Depends(get_current_user),  # 🔓 TODO: Depends(require_scope("write"))
+    current_user: User = Depends(require_scope("write")),
 ):
     """Publica un documento: el DUEÑO publica lo suyo; el admin, cualquiera.
 
@@ -139,6 +167,6 @@ def publish_document(
     doc = storage.get_document(doc_id)
     if doc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Documento no encontrado")
-    # 🔓 TODO: tenancy (403 si es de otra empresa).
-    # 🔓 TODO: object-level — ¿dueño o admin? si NO → 403 ("No podés publicar este documento").
+    _check_tenant(doc, current_user, "PUBLICAR")
+    _check_owner_or_admin(doc, current_user, "publicar")
     return storage.set_document_published(doc_id, True)
